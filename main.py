@@ -1,5 +1,7 @@
 import asyncio
 import os
+import time
+from collections import deque
 from contextlib import asynccontextmanager
 
 import redis.asyncio as redis
@@ -53,7 +55,7 @@ class ConnectionManager:
         self.active_connections[websocket] = username
 
     def disconnect(self, websocket: WebSocket):
-        del self.active_connections[websocket]
+        self.active_connections.pop(websocket, None)
 
     async def broadcast_locally(self, message: str):
         dead_connections = []
@@ -67,6 +69,32 @@ class ConnectionManager:
 
 
 manager = ConnectionManager()
+
+
+class RateLimiter:
+    def __init__(self, max_messages: int = 5, window_seconds: float = 10):
+        self.max_messages = max_messages
+        self.window_seconds = window_seconds
+        self.message_times: dict[WebSocket, deque[float]] = {}
+
+    def is_allowed(self, websocket: WebSocket) -> bool:
+        now = time.monotonic()
+        timestamps = self.message_times.setdefault(websocket, deque())
+
+        while timestamps and now - timestamps[0] > self.window_seconds:
+            timestamps.popleft()
+
+        if len(timestamps) >= self.max_messages:
+            return False
+
+        timestamps.append(now)
+        return True
+
+    def remove(self, websocket: WebSocket):
+        self.message_times.pop(websocket, None)
+
+
+rate_limiter = RateLimiter()
 
 
 async def publish(message: str):
@@ -100,6 +128,10 @@ async def websocket_endpoint(websocket: WebSocket):
         while True:
             data = await websocket.receive_text()
 
+            if not rate_limiter.is_allowed(websocket):
+                await websocket.send_text("You're sending messages too fast. Please slow down.")
+                continue
+
             async with async_session() as session:
                 session.add(Message(username=username, content=data))
                 await session.commit()
@@ -107,4 +139,5 @@ async def websocket_endpoint(websocket: WebSocket):
             await publish(f"{username}: {data}")
     except WebSocketDisconnect:
         manager.disconnect(websocket)
+        rate_limiter.remove(websocket)
         await publish(f"{username} left the chat")

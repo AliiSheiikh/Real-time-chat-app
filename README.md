@@ -9,6 +9,7 @@ A real-time chat application built with FastAPI and WebSockets, with persistent 
 - Join/leave announcements
 - Persistent message history (Postgres) — new clients see recent history on connect
 - Horizontally scalable — multiple server instances stay in sync via Redis pub/sub
+- Per-connection rate limiting — caps abusive clients without affecting others
 
 ## Tech stack
 
@@ -80,3 +81,19 @@ venv\Scripts\uvicorn main:app --port 8001
 ```
 
 Open the chat page against each port in separate browser tabs — messages sent from one instance are broadcast to clients connected to the other, via Redis.
+
+## Load testing
+
+`load_test.py` spins up many concurrent WebSocket clients (via `asyncio.gather`), has each one connect, send a message, and wait for it to be broadcast back, then reports connection throughput and round-trip latency:
+
+```bash
+venv\Scripts\python load_test.py 100
+```
+
+Results on a single local instance (Postgres, Redis, and the app all running on the same machine):
+
+| Concurrent clients | Wall time | Median latency | p95 latency |
+|---|---|---|---|
+| 100 | ~1.8s | ~300-500ms | ~1.3s |
+
+**A finding worth noting:** the initial instinct when tuning for load is "increase the database connection pool size." We tried it (5 base connections → 20, with overflow 10 → 30) expecting an improvement, and instead measured a *regression* — total time for 100 clients went from ~1.8s to 12-15s. The smaller pool was actually acting as a natural throttle, feeding Postgres a controlled trickle of work; removing that limit let 100 requests hit the database and event loop truly simultaneously, and something else (contention on this single dev machine running the load generator, app, Postgres, and Redis all at once) became the new bottleneck instead. The pool size was reverted back to SQLAlchemy's default after confirming this with repeated runs. Lesson: measure before tuning — the obvious fix isn't always the correct one.
