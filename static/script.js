@@ -2,7 +2,9 @@ const messages = document.getElementById("messages");
 const form = document.getElementById("form");
 const input = document.getElementById("input");
 
-const ws = new WebSocket(`ws://${window.location.host}/ws`);
+let username = prompt("Enter your name:") || "Anonymous";
+
+const ws = new WebSocket(`ws://${window.location.host}/ws?username=${encodeURIComponent(username)}`);
 
 ws.onmessage = (event) => {
     const li = document.createElement("li");
